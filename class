@@ -1,0 +1,757 @@
+CLASS zcl_sd_device_inv_init_load DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    TYPES: ty_erdat_range    TYPE RANGE OF erdat,
+           ty_equnr_range    TYPE RANGE OF equnr,
+           ty_matnr_range    TYPE RANGE OF matnr,
+           ty_sernr_range    TYPE RANGE OF gernr,
+           ty_zzserial_range TYPE RANGE OF zv_id_serial.
+
+    "! <p class="shorttext synchronized" lang="en">Passes parameters from screen to the member attributes</p>
+    METHODS: set_parameters
+      IMPORTING
+        irt_erdat    TYPE ty_erdat_range
+        irt_equnr    TYPE ty_equnr_range
+        irt_matnr    TYPE ty_matnr_range
+        irt_sernr    TYPE ty_sernr_range
+        irt_zzserial TYPE ty_zzserial_range
+        iv_alv       TYPE char1
+        iv_srv       TYPE char1
+        iv_dnwld     TYPE char1
+        iv_lfile     TYPE fileintern
+        iv_maxln     TYPE i
+        iv_separator TYPE c.
+
+    METHODS constructor .
+    "! <p class="shorttext synchronized" lang="en">Main method for processing datae export</p>
+    METHODS process_export.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    " Types for server information
+    TYPES: BEGIN OF ty_s_server_info,
+             server     TYPE msname,
+             free_jobs  TYPE i,
+             total_jobs TYPE i,
+           END OF ty_s_server_info.
+
+    TYPES: ty_t_server_info TYPE STANDARD TABLE OF  ty_s_server_info.
+
+    TYPES:  ty_t_csv_file TYPE STANDARD TABLE OF zsd_st_il_csv_file.
+
+    DATA mv_log_handle TYPE balloghndl.
+    DATA: mt_equi TYPE STANDARD TABLE OF zsd_st_il_csv_file.
+    DATA mv_physical_file TYPE string.
+
+    "// Member variables to store the parameters
+    DATA: mrt_erdat    TYPE ty_erdat_range,
+          mrt_equnr    TYPE ty_equnr_range,
+          mrt_matnr    TYPE ty_matnr_range,
+          mrt_sernr    TYPE ty_sernr_range,
+          mrt_zzserial TYPE ty_zzserial_range,
+          mv_alv       TYPE abap_bool,
+          mv_srv       TYPE abap_bool,
+          mv_dnwld     TYPE abap_bool,
+          mv_lfile     TYPE fileintern,
+          mv_maxln     TYPE i,
+          mv_separator TYPE c.
+
+    "! <p class="shorttext synchronized" lang="en">Adds a log message to Applog</p>
+    METHODS add_message
+      IMPORTING
+        iv_msg      TYPE string
+        iv_msg_type TYPE symsgty.
+    "! <p class="shorttext synchronized" lang="en">Displays Applog</p>
+    METHODS display_log.
+    "! <p class="shorttext synchronized" lang="en">Displays data in ALV</p>
+    METHODS display_alv.
+    "! <p class="shorttext synchronized" lang="en">Writes file to a folder on App Server</p>
+    METHODS save_to_app_server
+      RAISING
+        zcx_sd_device_inv.
+    "! <p class="shorttext synchronized" lang="en">Writes file to a folder on PC</p>
+    METHODS save_to_pc.
+    "! <p class="shorttext synchronized" lang="en">Reads equipment data</p>
+    METHODS get_equi_data
+      RAISING
+        zcx_sd_device_inv.
+
+    "! <p class="shorttext synchronized" lang="en">Returns physical file name</p>
+    "! @parameter iv_lfn | <p class="shorttext synchronized" lang="en">Logical filename</p>
+    METHODS get_physical_file_path
+      IMPORTING
+                !iv_lfn         TYPE fileintern
+                iv_sequence_num TYPE i
+      RETURNING VALUE(rv_phfp)  TYPE string
+      RAISING
+                zcx_sd_device_inv.
+    "! <p class="shorttext synchronized" lang="en">Writes data in chunks onto AppServer</p>
+    "! @parameter iv_filename | <p class="shorttext synchronized" lang="en">Filename which includes timestamp and file numbering</p>
+    "! @parameter it_equi | <p class="shorttext synchronized" lang="en">Importing table of data to be exported </p>
+    METHODS write_file_to_server
+      IMPORTING iv_filename TYPE string
+                it_equi     TYPE ty_t_csv_file
+      RAISING
+                zcx_sd_device_inv.
+
+    METHODS convert_itab_to_csv
+      IMPORTING
+        it_table           TYPE ANY TABLE
+        iv_separator       TYPE c
+      RETURNING
+        VALUE(rt_csv_data) TYPE string_table
+      RAISING
+        zcx_sd_device_inv.
+    
+*    METHODS  get_server_job_stats
+*      RETURNING VALUE(rt_servers) TYPE ty_t_server_info.
+
+    METHODS  schedule_export_jobs
+      IMPORTING iv_export_program TYPE progname
+                it_server_info    TYPE ty_t_server_info
+                it_export_data    TYPE ANY TABLE.
+    METHODS create_background_job
+      IMPORTING iv_server          TYPE msname
+                iv_export_program  TYPE progname
+                is_export_data     TYPE any
+      RETURNING VALUE(rv_jobcount) TYPE tbtcjob-jobcount.
+ENDCLASS.
+
+
+
+CLASS ZCL_SD_DEVICE_INV_INIT_LOAD IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->ADD_MESSAGE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_MSG                         TYPE        STRING
+* | [--->] IV_MSG_TYPE                    TYPE        SYMSGTY
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_message.
+    DATA: lv_msg TYPE text255.
+
+    lv_msg = |{ iv_msg }|.
+    CALL FUNCTION 'BAL_LOG_MSG_ADD_FREE_TEXT'
+      EXPORTING
+        i_log_handle     = mv_log_handle
+        i_msgty          = iv_msg_type
+        i_text           = lv_msg
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_SD_DEVICE_INV_INIT_LOAD->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD constructor.
+
+    "//create simple application log
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        i_s_log                 = VALUE bal_s_log( extnumber = 'DISCO Initial Load'(001)
+                                                   aldate    = sy-datum
+                                                   altime    = sy-uzeit
+                                                   altcode   = sy-tcode
+                                                   aluser    = sy-uname )
+      IMPORTING
+        e_log_handle            = mv_log_handle
+      EXCEPTIONS
+        log_header_inconsistent = 1
+        OTHERS                  = 2.
+    ASSERT sy-subrc EQ 0.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->DISPLAY_LOG
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD display_log.
+
+    DATA: ls_profile TYPE bal_s_prof.
+
+    CALL FUNCTION 'BAL_DSP_PROFILE_NO_TREE_GET'
+      IMPORTING
+        e_s_display_profile = ls_profile.
+
+    ls_profile-use_grid = abap_true.
+
+    CALL FUNCTION 'BAL_DSP_LOG_DISPLAY'
+      EXPORTING
+        i_s_display_profile  = ls_profile
+        i_t_log_handle       = VALUE bal_t_logh( ( mv_log_handle ) )
+      EXCEPTIONS
+        profile_inconsistent = 1
+        internal_error       = 2
+        no_data_available    = 3
+        no_authority         = 4
+        OTHERS               = 5.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+                 WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->GET_EQUI_DATA
+* +-------------------------------------------------------------------------------------------------+
+* | [!CX!] ZCX_SD_DEVICE_INV
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_equi_data.
+*  select
+*     from i_equipment
+*  FIELDS
+*    equipement as ndlhid,
+*    material as sku,
+*    zzserial as serialnumber,
+*    zzmac1 as cm_mac_address,
+*    zzmac2 as mta_mac
+*    as e.
+
+    SELECT * FROM zi_equi_obj_list
+      INTO CORRESPONDING FIELDS OF TABLE @mt_equi
+       WHERE erdat IN @mrt_erdat
+          AND ndlhid IN @mrt_equnr
+*      AND sernr IN mrt_sernr
+          AND serialnumber IN @mrt_zzserial.
+
+*    SELECT
+*      equnr AS ndlhid,
+*      changeddatetime AS timeoccured,
+*      mt~maktx AS description,
+*      mt~maktx AS name,
+*      zzerial as serialnumber,
+*      zzmac1 as CM_MAC_ADDRESS,
+*      e~matnr as SKU,
+*      ' ' as Legal_Entity_ID,
+*      m~mfrpn as Model_ID,
+*      zzmac2 as MTA_MAC_Address,
+*      m~mfrnr as Manufacturer,
+*      '' as hw_type
+**      case when s_eqbs = 'X'
+**           then s~bwerk
+**           else
+**      end as ressource
+*
+*      INTO CORRESPONDING FIELDS OF TABLE mt_equi
+*      FROM equi AS e
+*      inner join mara as m
+*      on e~matnr = m~matnr
+*      INNER JOIN makt AS mt
+*        ON e~matnr = mt~matnr
+*      left outer join eqbs as s
+*      on e~equnr = s~equnr
+*      left outer join objk as o
+*      on e~equnr = o~equnr
+*      and o~datum
+*      WHERE erdat IN mrt_erdat
+*      AND  equnr IN mrt_equnr
+*      AND sernr IN mrt_sernr
+*      AND zzserial IN mrt_zzserial
+*      AND mt~spras = sy-langu.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_SD_DEVICE_INV_INIT_LOAD->PROCESS_EXPORT
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD process_export.
+
+    TRY.
+
+        me->get_equi_data( ).
+
+
+        CASE abap_true.
+          WHEN mv_alv.
+            me->display_alv( ).
+          WHEN mv_srv.
+            me->save_to_app_server( ).
+          WHEN mv_dnwld.
+            me->save_to_pc( ).
+        ENDCASE.
+
+      CATCH zcx_sd_device_inv.
+
+    ENDTRY.
+
+    "// Get Data from EQUI,EQBS,EQKT
+*    me->get_equi_data( ).
+
+
+
+
+    me->display_log( ).
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_SD_DEVICE_INV_INIT_LOAD->SET_PARAMETERS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IRT_ERDAT                      TYPE        TY_ERDAT_RANGE
+* | [--->] IRT_EQUNR                      TYPE        TY_EQUNR_RANGE
+* | [--->] IRT_MATNR                      TYPE        TY_MATNR_RANGE
+* | [--->] IRT_SERNR                      TYPE        TY_SERNR_RANGE
+* | [--->] IRT_ZZSERIAL                   TYPE        TY_ZZSERIAL_RANGE
+* | [--->] IV_ALV                         TYPE        CHAR1
+* | [--->] IV_SRV                         TYPE        CHAR1
+* | [--->] IV_DNWLD                       TYPE        CHAR1
+* | [--->] IV_LFILE                       TYPE        FILEINTERN
+* | [--->] IV_MAXLN                       TYPE        I
+* | [--->] IV_SEPARATOR                   TYPE        C
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD set_parameters.
+    " Store the parameters in the member variables
+    mrt_erdat = irt_erdat.
+    mrt_equnr = irt_equnr.
+    mrt_matnr = irt_matnr.
+    mrt_sernr = irt_sernr.
+    mrt_zzserial = irt_zzserial.
+    mv_alv = iv_alv.
+    mv_srv = iv_srv.
+    mv_dnwld = iv_dnwld.
+    mv_lfile = iv_lfile.
+    mv_maxln = iv_maxln.
+    mv_separator = iv_separator.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->DISPLAY_ALV
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD display_alv.
+    DATA: lo_salv      TYPE REF TO cl_salv_table,
+          lo_functions TYPE REF TO cl_salv_functions_list.
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table = lo_salv
+          CHANGING
+            t_table      = mt_equi ).
+
+        "//Get full screen functions
+        lo_functions = lo_salv->get_functions( ).
+        lo_functions->set_all( abap_true ).
+
+*        " Optional: Set layout
+*        DATA(lo_layout) = lo_salv->get_layout( ).
+*        lo_layout->set_key( value = 'NDLHID' ).
+*        lo_layout->set_save_restriction( 1 ). " Allow save/restore
+
+        " Optional: Enable column optimization
+        lo_salv->get_columns( )->set_optimize( ).
+
+        " Display SALV in full screen
+        lo_salv->display( ).
+
+      CATCH cx_salv_msg INTO DATA(lx_msg).
+
+        me->add_message(
+          iv_msg      = |{ lx_msg->get_text( ) }|
+          iv_msg_type = if_msg_output=>msgtype_error ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->SAVE_TO_APP_SERVER
+* +-------------------------------------------------------------------------------------------------+
+* | [!CX!] ZCX_SD_DEVICE_INV
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD save_to_app_server.
+    DATA:
+      lv_filename      TYPE string,
+      lv_filename_sub  TYPE string,
+      lv_logical_name  TYPE filenameci-fileintern,
+      lv_physical_file TYPE string,
+      lv_timestamp     TYPE char19,
+      lv_line          TYPE string,
+      lv_separator     TYPE char1 VALUE ';'.
+    DATA: lv_file_number TYPE i,
+          lt_sub_table   TYPE TABLE OF zsd_st_il_csv_file,
+          lv_start_index TYPE i,
+          lv_end_index   TYPE i.
+
+    " Determine the number of files needed
+    DATA(lv_total_lines) = lines( mt_equi ).
+    DATA(lv_num_files) = lv_total_lines / mv_maxln.
+    IF lv_total_lines MOD mv_maxln > 0.
+      lv_num_files = lv_num_files + 1.
+    ENDIF.
+
+    DO lv_num_files TIMES.
+      lv_file_number = sy-index.
+      "//get file based on Logical Filename
+      lv_physical_file = me->get_physical_file_path( iv_lfn = mv_lfile iv_sequence_num = lv_file_number ).
+
+      " Calculate the start and end indices for the current file
+      lv_start_index = ( lv_file_number - 1 ) * mv_maxln + 1.
+      lv_end_index = lv_file_number * mv_maxln.
+      IF lv_end_index > lv_total_lines.
+        lv_end_index = lv_total_lines.
+      ENDIF.
+
+      " Get the sub-table for the current file
+      CLEAR lt_sub_table.
+      LOOP AT mt_equi INTO DATA(ls_equi) FROM lv_start_index TO lv_end_index.
+        APPEND ls_equi TO lt_sub_table.
+      ENDLOOP.
+
+
+      me->write_file_to_server( iv_filename = lv_physical_file
+                                it_equi     = lt_sub_table ).
+      "//Add file name
+      me->add_message(
+        iv_msg      = |{ 'File'(002) } { lv_filename_sub } { 'was saved to AppServer'(004) } |
+        iv_msg_type = if_msg_output=>msgtype_success ).
+
+    ENDDO.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->SAVE_TO_PC
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD save_to_pc.
+    "//
+    DATA: lv_path TYPE string.
+    CALL FUNCTION 'GUI_DOWNLOAD'
+      EXPORTING
+        filename         = lv_path     " specify directory and filename
+        filetype         = 'ASC'
+      TABLES
+        data_tab         = mt_equi
+      EXCEPTIONS
+        file_write_error = 1
+        OTHERS           = 2.
+    IF sy-subrc <> 0.
+      " Handle error
+    ENDIF.
+
+    "// Where is the file exported
+    me->add_message(
+      iv_msg      = |{ 'File'(002) } { mv_physical_file } { 'was saved to PC'(003) } |
+      iv_msg_type = if_msg_output=>msgtype_success ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->GET_PHYSICAL_FILE_PATH
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_LFN                         TYPE        FILEINTERN
+* | [--->] IV_SEQUENCE_NUM                TYPE        I
+* | [<-()] RV_PHFP                        TYPE        STRING
+* | [!CX!] ZCX_SD_DEVICE_INV
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_physical_file_path.
+
+    "// Based on the Logical File name get the physical file
+    CALL FUNCTION 'FILE_GET_NAME'
+      EXPORTING
+        logical_filename = iv_lfn
+        parameter_1      = iv_sequence_num
+      IMPORTING
+        file_name        = rv_phfp
+      EXCEPTIONS
+        file_not_found   = 1
+        OTHERS           = 2.
+
+    IF sy-subrc NE 0.
+
+      me->add_message(
+        iv_msg      = |{ 'Logical file not found'(018) }|
+        iv_msg_type = if_msg_output=>msgtype_error ).
+
+    ELSE.
+
+      me->add_message(
+        iv_msg      = |{ 'Logical filename'(007) } { mv_lfile } was found| ##NO_TEXT
+        iv_msg_type = if_msg_output=>msgtype_info ).
+
+      me->add_message(
+        iv_msg      = |{ 'Physical path'(006) } { rv_phfp }| ##NO_TEXT
+        iv_msg_type = if_msg_output=>msgtype_info ).
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->WRITE_FILE_TO_SERVER
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FILENAME                    TYPE        STRING
+* | [--->] IT_EQUI                        TYPE        TY_T_CSV_FILE
+* | [!CX!] ZCX_SD_DEVICE_INV
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD  write_file_to_server.
+    DATA: lt_csvdata TYPE STANDARD TABLE OF string.
+
+    lt_csvdata = me->convert_itab_to_csv( it_table     = it_equi
+                                          iv_separator = mv_separator ).
+
+*    CATCH cx_dynamic_check. " Exceptions with Dynamic Check Only of the RAISING Clause
+
+    TRY.
+        "// Write the content to a file on App Server
+        OPEN DATASET iv_filename FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+
+        IF sy-subrc <> 0.
+          "//Error opening file on the server'
+          MESSAGE 'Error opening file'(016) TYPE 'E'.
+          RETURN.
+        ENDIF.
+
+
+        LOOP AT mt_equi ASSIGNING FIELD-SYMBOL(<fs_line>).
+          TRANSFER <fs_line> TO mv_physical_file.
+        ENDLOOP.
+
+        DATA(lv_lines) = lines( mt_equi ).
+
+        me->add_message(
+          iv_msg      = |Total { lv_lines } { 'lines are written to file'(016) }| ##NO_TEXT
+          iv_msg_type = if_msg_output=>msgtype_success ).
+
+        CLOSE DATASET iv_filename.
+
+        IF sy-subrc EQ 0.
+
+          me->add_message(
+            iv_msg      = |{ 'File successfully written to OS folder'(008) }|
+            iv_msg_type = if_msg_output=>msgtype_success ).
+
+        ENDIF.
+
+      CATCH cx_sy_file_close INTO DATA(lx_file_close).
+
+        MESSAGE lx_file_close->get_text( ) TYPE 'E'.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->CONVERT_ITAB_TO_CSV
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IT_TABLE                       TYPE        ANY TABLE
+* | [--->] IV_SEPARATOR                   TYPE        C
+* | [<-()] RT_CSV_DATA                    TYPE        STRING_TABLE
+* | [!CX!] ZCX_SD_DEVICE_INV
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD convert_itab_to_csv.
+    DATA: lv_string TYPE string,
+          lv_line   TYPE string,
+          lt_fields TYPE TABLE OF string.
+
+    FIELD-SYMBOLS: <fs_table> TYPE ANY TABLE,
+                   <fs_wa>    TYPE any,
+                   <fs_field> TYPE any.
+
+    " Assign internal table to field symbol
+    ASSIGN it_table[] TO <fs_table>.
+
+    " Get structure description of internal table
+    DATA(lo_struct_descr) = CAST cl_abap_structdescr(
+      cl_abap_typedescr=>describe_by_data( <fs_table> ) ).
+
+    " Get field names for header
+    DATA(lt_components) = lo_struct_descr->get_components( ).
+
+    " Create header row
+    LOOP AT lt_components ASSIGNING FIELD-SYMBOL(<fs_comp>).
+      APPEND <fs_comp>-name TO lt_fields.
+    ENDLOOP.
+
+    " Join field names with comma separator
+    CONCATENATE LINES OF lt_fields INTO lv_line SEPARATED BY iv_separator.
+    APPEND lv_line TO rt_csv_data.
+
+    " Process data rows
+    LOOP AT <fs_table> ASSIGNING <fs_wa>.
+      CLEAR: lv_line, lt_fields.
+
+      " Get values for each field
+      LOOP AT lt_components ASSIGNING <fs_comp>.
+        ASSIGN COMPONENT <fs_comp>-name OF STRUCTURE <fs_wa> TO <fs_field>.
+        IF sy-subrc = 0.
+          lv_string = <fs_field>.
+        ELSE.
+          lv_string = ''.
+        ENDIF.
+        APPEND lv_string TO lt_fields.
+      ENDLOOP.
+
+      " Join fields with comma separator
+      CONCATENATE LINES OF lt_fields INTO lv_line SEPARATED BY iv_separator.
+      APPEND lv_line TO rt_csv_data.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->CREATE_BACKGROUND_JOB
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_SERVER                      TYPE        MSNAME
+* | [--->] IV_EXPORT_PROGRAM              TYPE        PROGNAME
+* | [--->] IS_EXPORT_DATA                 TYPE        ANY
+* | [<-()] RV_JOBCOUNT                    TYPE        TBTCJOB-JOBCOUNT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD create_background_job.
+    DATA: lv_jobname   TYPE tbtcjob-jobname,
+          lv_startdate TYPE sy-datum,
+          lv_starttime TYPE sy-uzeit.
+
+    lv_jobname = |EXPORT_{ sy-datum }_{ sy-uzeit }|.
+    GET TIME STAMP FIELD DATA(lv_timestamp).
+
+*    * Get current date/time for immediate execution
+    lv_startdate = sy-datum.
+    lv_starttime = sy-uzeit.
+
+*    * Create job
+    CALL FUNCTION 'JOB_OPEN'
+      EXPORTING
+        jobname          = lv_jobname
+        jobclass         = 'B'  " Background processing
+        server           = iv_server
+      IMPORTING
+        jobcount         = rv_jobcount
+      EXCEPTIONS
+        cant_create_job  = 1
+        invalid_job_data = 2
+        jobname_missing  = 3
+        OTHERS           = 4.
+
+    IF sy-subrc = 0.
+*      * Submit program with export data
+*      SUBMIT (iv_export_program)
+*        WITH p_data = is_export_data
+*        VIA JOB lv_jobname NUMBER rv_jobcount
+*        AND RETURN.
+
+*      * Release job for immediate execution
+      CALL FUNCTION 'JOB_CLOSE'
+        EXPORTING
+          jobcount             = rv_jobcount
+          jobname              = lv_jobname
+          strtimmed            = 'X'
+        EXCEPTIONS
+          cant_start_immediate = 1
+          invalid_startdate    = 2
+          jobname_missing      = 3
+          job_close_failed     = 4
+          job_nosteps          = 5
+          job_notex            = 6
+          lock_failed          = 7
+          invalid_target       = 8
+          OTHERS               = 9.
+
+      IF sy-subrc <> 0.
+        CLEAR rv_jobcount.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+*  METHOD get_server_job_stats.
+*    DATA: ls_server_info TYPE ty_s_server_info,
+*          lt_servers     TYPE TABLE OF msxxlist.
+*
+**    * Get list of application servers
+*    CALL FUNCTION 'TH_SERVER_LIST'
+*      TABLES
+*        list           = lt_servers
+*      EXCEPTIONS
+*        no_server_list = 1
+*        OTHERS         = 2.
+*
+*    IF sy-subrc <> 0.
+*      MESSAGE 'Error getting server list' TYPE 'E'.
+*      RETURN.
+*    ENDIF.
+*
+**    * Query each server for background job availability
+*    LOOP AT lt_servers ASSIGNING FIELD-SYMBOL(<ls_server>).
+*      CLEAR ls_server_info.
+*      ls_server_info-server = <ls_server>-name.
+*
+**      SELECT COUNT(*) FROM tbtco
+**        WHERE status = 'R'  " Running jobs
+**          AND progname LIKE 'R%'  " Background jobs
+**          AND servername = @<ls_server>-name
+**        INTO @ls_server_info-total_jobs.
+*
+**      * Calculate free job slots (assuming max 99 background jobs per server)
+*      ls_server_info-free_jobs = 99 - ls_server_info-total_jobs.
+*      IF ls_server_info-free_jobs > 0.
+*        APPEND ls_server_info TO rt_servers.
+*      ENDIF.
+*    ENDLOOP.
+*
+**    * Sort by number of free jobs descending
+*    SORT rt_servers BY free_jobs DESCENDING.
+*  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_SD_DEVICE_INV_INIT_LOAD->SCHEDULE_EXPORT_JOBS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_EXPORT_PROGRAM              TYPE        PROGNAME
+* | [--->] IT_SERVER_INFO                 TYPE        TY_T_SERVER_INFO
+* | [--->] IT_EXPORT_DATA                 TYPE        ANY TABLE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD schedule_export_jobs.
+    DATA: lv_jobname    TYPE tbtcjob-jobname,
+          lv_jobcount   TYPE tbtcjob-jobcount,
+          lv_timestamp  TYPE timestamp,
+          lv_server_idx TYPE i VALUE 1.
+
+    GET TIME STAMP FIELD lv_timestamp.
+
+*    * Loop through export data and schedule jobs on available servers
+    LOOP AT it_export_data ASSIGNING FIELD-SYMBOL(<ls_export_data>).
+      IF lv_server_idx > lines( it_server_info ).
+        lv_server_idx = 1.  " Reset to first server if we've used all servers
+      ENDIF.
+
+      READ TABLE it_server_info INDEX lv_server_idx
+        ASSIGNING FIELD-SYMBOL(<ls_server>).
+
+*      * Create unique job name
+      lv_jobname = |EXPORT_{ lv_timestamp }_{ sy-tabix }|.
+
+*      * Schedule the job on the selected server
+      lv_jobcount = create_background_job(
+        iv_server         = <ls_server>-server
+        iv_export_program = iv_export_program
+        is_export_data    = <ls_export_data> ).
+
+      IF lv_jobcount IS NOT INITIAL.
+        lv_server_idx = lv_server_idx + 1.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+ENDCLASS.

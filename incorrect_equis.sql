@@ -1,0 +1,126 @@
+-- Comprehensive SQL to get all equipment with incorrect ZZSERIAL and their old values from CDPOS
+WITH INCORRECT_EQUIPMENT AS (
+    -- Get all equipment where SERNR != ZZSERIAL
+    SELECT 
+        e.MANDT,
+        e.EQUNR,
+        e.SERNR,
+        e.ZZSERIAL AS CURRENT_ZZSERIAL,
+        e.ZZIMEI AS CURRENT_ZZIMEI,
+        e.ZZMAC1 AS CURRENT_ZZMAC1,
+        e.ZZMAC2 AS CURRENT_ZZMAC2,
+        e.ZZMAC3 AS CURRENT_ZZMAC3,
+        e.ZZCAID AS CURRENT_ZZCAID,
+        e.ZZPINCODE AS CURRENT_ZZPINCODE,
+        e.ZZIMEI2 AS CURRENT_ZZIMEI2,
+        e.ZZESIM AS CURRENT_ZZESIM,
+        e.AEDAT AS EQUI_CHANGE_DATE,
+        e.AENAM AS EQUI_CHANGED_BY
+    FROM EQUI e
+    WHERE 
+        e.MANDT = '118'
+        AND e.EQTYP = '1'
+        AND e.AEDAT = '20251014'
+        AND e.AENAM = 'FF_AO_1'
+        AND LTRIM(e.SERNR, '0') <> LTRIM(e.ZZSERIAL, '0')
+),
+CHANGE_DOCS AS (
+    -- Get change document headers for these equipment
+    SELECT DISTINCT
+        cd.MANDANT,
+        cd.OBJECTCLAS,
+        cd.OBJECTID,
+        cd.CHANGENR,
+        cd.UDATE,
+        cd.UTIME,
+        cd.USERNAME
+    FROM INCORRECT_EQUIPMENT ie
+    INNER JOIN CDHDR cd
+        ON cd.MANDANT = ie.MANDT
+        AND cd.OBJECTCLAS = 'EQUI'
+        AND cd.OBJECTID = ie.EQUNR
+        AND cd.UDATE = '20251014'
+        AND cd.USERNAME = 'FF_AO_1'
+),
+OLD_VALUES AS (
+    -- Get old values from CDPOS for the change documents
+    SELECT 
+        cp.MANDANT,
+        cp.OBJECTID AS EQUNR,
+        cp.CHANGENR,
+        cp.TABNAME,
+        cp.FNAME,
+        cp.VALUE_OLD,
+        cp.VALUE_NEW
+    FROM CHANGE_DOCS cd
+    INNER JOIN CDPOS cp
+        ON cp.MANDANT = cd.MANDANT
+        AND cp.OBJECTCLAS = cd.OBJECTCLAS
+        AND cp.OBJECTID = cd.OBJECTID
+        AND cp.CHANGENR = cd.CHANGENR
+    WHERE 
+        cp.TABNAME = 'EQUI'
+        AND cp.FNAME IN ('ZZSERIAL', 'ZZIMEI', 'ZZMAC1', 'ZZMAC2', 'ZZMAC3', 
+                         'ZZCAID', 'ZZPINCODE', 'ZZIMEI2', 'ZZESIM')
+),
+PIVOTED_OLD_VALUES AS (
+    -- Pivot old values into columns
+    SELECT 
+        EQUNR,
+        MAX(CHANGENR) AS CHANGENR,
+        MAX(CASE WHEN FNAME = 'ZZSERIAL' THEN VALUE_OLD END) AS OLD_ZZSERIAL,
+        MAX(CASE WHEN FNAME = 'ZZIMEI' THEN VALUE_OLD END) AS OLD_ZZIMEI,
+        MAX(CASE WHEN FNAME = 'ZZMAC1' THEN VALUE_OLD END) AS OLD_ZZMAC1,
+        MAX(CASE WHEN FNAME = 'ZZMAC2' THEN VALUE_OLD END) AS OLD_ZZMAC2,
+        MAX(CASE WHEN FNAME = 'ZZMAC3' THEN VALUE_OLD END) AS OLD_ZZMAC3,
+        MAX(CASE WHEN FNAME = 'ZZCAID' THEN VALUE_OLD END) AS OLD_ZZCAID,
+        MAX(CASE WHEN FNAME = 'ZZPINCODE' THEN VALUE_OLD END) AS OLD_ZZPINCODE,
+        MAX(CASE WHEN FNAME = 'ZZIMEI2' THEN VALUE_OLD END) AS OLD_ZZIMEI2,
+        MAX(CASE WHEN FNAME = 'ZZESIM' THEN VALUE_OLD END) AS OLD_ZZESIM
+    FROM OLD_VALUES
+    GROUP BY EQUNR
+)
+SELECT 
+    ie.EQUNR,
+    ie.SERNR AS EQUI_SERNR,
+    ie.EQUI_CHANGE_DATE,
+    ie.EQUI_CHANGED_BY,
+    pov.CHANGENR,
+    
+    -- Show correct (old) values and current (incorrect) values
+    pov.OLD_ZZSERIAL AS CORRECT_ZZSERIAL,
+    ie.CURRENT_ZZSERIAL,
+    CASE 
+        WHEN pov.OLD_ZZSERIAL IS NULL THEN 'NO CHANGE DOC'
+        WHEN LTRIM(pov.OLD_ZZSERIAL, '0') = LTRIM(ie.SERNR, '0') THEN 'CORRECT'
+        ELSE 'MISMATCH'
+    END AS ZZSERIAL_STATUS,
+    
+    pov.OLD_ZZIMEI AS CORRECT_ZZIMEI,
+    ie.CURRENT_ZZIMEI,
+    
+    pov.OLD_ZZMAC1 AS CORRECT_ZZMAC1,
+    ie.CURRENT_ZZMAC1,
+    
+    pov.OLD_ZZMAC2 AS CORRECT_ZZMAC2,
+    ie.CURRENT_ZZMAC2,
+    
+    pov.OLD_ZZMAC3 AS CORRECT_ZZMAC3,
+    ie.CURRENT_ZZMAC3,
+    
+    pov.OLD_ZZCAID AS CORRECT_ZZCAID,
+    ie.CURRENT_ZZCAID,
+    
+    pov.OLD_ZZPINCODE AS CORRECT_ZZPINCODE,
+    ie.CURRENT_ZZPINCODE,
+    
+    pov.OLD_ZZIMEI2 AS CORRECT_ZZIMEI2,
+    ie.CURRENT_ZZIMEI2,
+    
+    pov.OLD_ZZESIM AS CORRECT_ZZESIM,
+    ie.CURRENT_ZZESIM
+
+FROM INCORRECT_EQUIPMENT ie
+LEFT JOIN PIVOTED_OLD_VALUES pov
+    ON pov.EQUNR = ie.EQUNR
+ORDER BY ie.EQUNR;

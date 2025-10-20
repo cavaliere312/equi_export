@@ -5,6 +5,7 @@ WITH INCORRECT_EQUIPMENT AS (
         e.MANDT,
         e.EQUNR,
         e.SERNR,
+        e.matnr,
         e.ZZSERIAL AS CURRENT_ZZSERIAL,
         e.ZZIMEI AS CURRENT_ZZIMEI,
         e.ZZMAC1 AS CURRENT_ZZMAC1,
@@ -83,6 +84,7 @@ PIVOTED_OLD_VALUES AS (
 SELECT 
     ie.EQUNR,
     ie.SERNR AS EQUI_SERNR,
+    ie.matnr,
     ie.EQUI_CHANGE_DATE,
     ie.EQUI_CHANGED_BY,
     pov.CHANGENR,
